@@ -16,6 +16,7 @@ https_url_prefix = "https://"
 content_type = "application/json;charset=UTF-8"
 accept_encoding = "gzip, deflate, br"
 log_file_path = 'application.log'
+always_add_port_to_real = False
 
 ####################
 # Helper functions #
@@ -309,6 +310,8 @@ def generate_server_config(server, default_port=None):
     """Generate the configuration for a single server, adjusting the name based on port presence."""
     # Determine if the port should be added to the server's real name
     add_port_to_real = 'port' in server and (default_port is None or server['port'] != default_port)
+    if always_add_port_to_real:
+        add_port_to_real = True
     server_name = server['name']
     if not add_port_to_real:
         server_name = server['address']
@@ -383,7 +386,7 @@ def generate_group_config(group_name, servers, is_backup=False, balance='default
         server_name = server['name']
 
         # if there is a common port we won't add port to the real, and will configure it on the service
-        if common_port != None:
+        if common_port != None and not always_add_port_to_real:
             server_name = server['address']
             
         group_config_lines.append(f" \t add {server_name}")
@@ -665,7 +668,7 @@ def parse_acl(line):
                         }
                     })
                 elif segment == '/':  # Log root path usage
-                    logging.warning(f"unhandled root path: '/' used in ACL named {acl_name}. ignoring..", level='info')
+                    logging.warning(f"unhandled root path: '/' used in ACL named {acl_name}. ignoring..")
                     acl_entries.append({
                         'name': acl_name,
                         'condition': {
@@ -1115,8 +1118,12 @@ def main():
     parser.add_argument('-u', '--username', type=str, default='admin', help='Username for the Alteon device.')
     parser.add_argument('-p', '--password', type=str, default='admin', help='Password for the Alteon device.')
     parser.add_argument('-pass', '--passphrase', type=str, default='passphrase', help='Passphrase for additional security measures.')
+    parser.add_argument('--always-add-port', dest='always_add_port', action='store_true', help='Always add port to real server configurations.')
     
     args = parser.parse_args()
+
+    global always_add_port_to_real
+    always_add_port_to_real = args.always_add_port
 
     # Set up logging
     setup_logging()
