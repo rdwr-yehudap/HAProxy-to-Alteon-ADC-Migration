@@ -140,12 +140,12 @@ def generate_virtual_service_configs(data, cert="WebManagementCert", ssl_pol="Ou
             service_config += f" \tgroup {data['default_backend']}\n"
         elif 'servers' in data and len(data['servers']) > 0:
             service_config += f" \tgroup {data['name']}\n"
-        elif 'use_backends' in data:
-            for i, backend in enumerate(data['use_backends'], 1):
-                service_config += f" /c/slb/virt {data['name']}/service {bind['port']} {service_type}/cntrules {i}\n"
-                service_config += f" \tena\n"
-                service_config += f" \tcntclss \"{backend['backend']}\"\n"
-                service_config += f" \tgroup {backend['backend']}\n"
+            if len(data['acls']) > 0:
+                backend_info, acls_list = prepare_backend_config_for_acls(data)
+                if backend_info is not None and acls_list is not None:
+                    service_config += generate_backend_service_configs(data['name'], bind['port'], service_type, [backend_info])
+        elif 'use_backends' in data and len(data['use_backends']) > 0:
+            service_config += generate_backend_service_configs(data['name'], bind['port'], service_type, data['use_backends'])
 
         # Generate a random 8-character prefix
         random_prefix = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
@@ -215,12 +215,12 @@ def generate_content_class_config(backend, acls):
     for acl in acls:
         if acl['name'] in backend['conditions']:
             condition = acl['condition']
-            if 'host' in condition:
+            if 'host' in condition and condition['host'] != None:
                 class_config += f"/c/slb/layer7/slb/cntclss {backend['backend']} http/header {header_count}\n"
                 class_config += f" \t header NAME=host \"VALUE={condition['host']}\"\n"
                 class_config += f" \t match NAME=include \"VALUE=equal\"\n"
                 header_count += 1
-            if 'path' in condition:
+            if 'path' in condition and condition['path'] != None:
                 match_type = "equal"
                 if condition['type'] == 'path_beg':
                     match_type = "prefx"
@@ -232,7 +232,7 @@ def generate_content_class_config(backend, acls):
                 class_config += f" \t match {match_type}\n"
                 path_count += 1
     if path_count == 1 and header_count == 1:
-        log_action(f"add content class for: {str(backend)}, couldn't determine L7 config from the following: {str(acl)}")
+        log_action(f"add content class for: {str(backend)}, couldn't determine L7 config from the following: {str(acls)}")
         return ''
     
     return class_config
@@ -431,8 +431,8 @@ def generate_alteon_listen(data):
     else:
         logging.error("No bind IP provided in data.")
         return ""
-
-    listen_config.append(generate_virtual_service_base(data['name'], vip_ip))
+    virt_name = data['name']
+    listen_config.append(generate_virtual_service_base(virt_name, vip_ip))
     listen_config.extend(generate_virtual_service_configs(data))
 
     # Determine the balance strategy to use for the server groups
@@ -440,7 +440,7 @@ def generate_alteon_listen(data):
 
     # Process server configurations
     if data['servers']:
-        group_name = data['name']
+        group_name = virt_name
         primary_servers = [s for s in data['servers'] if 'backup' not in s.get('server_options', {})]
         backup_servers = [s for s in data['servers'] if 'backup' in s.get('server_options', {})]
 
@@ -457,14 +457,14 @@ def generate_alteon_listen(data):
     if data.get('maxconn'):
         logging.warning(f"Maxconn '{data['maxconn']}' specified but not handled directly in Alteon config.")
     if data['redirects']:
-        logging.warning(f"Redirects specified but not handled. skipping redirect for {str(data['redirects'])} virt {data['name']} ")
-        log_action(f"Add redirect: virt {data['name']} has unhandled redirect rule {str(data['redirects'])}")
+        logging.warning(f"Redirects specified but not handled. skipping redirect for {str(data['redirects'])} virt {virt_name} ")
+        log_action(f"Add redirect: virt {virt_name} has unhandled redirect rule {str(data['redirects'])}")
     if data['compression']:
         logging.warning(f"Compression settings specified but not handled: {data['compression']}")
-        log_action(f"Add compression: virt {data['name']} has unhandled compression setting {data['compression']}")
+        log_action(f"Add compression: virt {virt_name} has unhandled compression setting {data['compression']}")
     if data['stick_tables']:
         logging.warning("Stick tables specified but not handled.")
-        log_action(f"Add persistency: virt {data['name']} has unhandled stick_table setting {data['stick_tables']}")
+        log_action(f"Add persistency: virt {virt_name} has unhandled stick_table setting {data['stick_tables']}")
     
     if data['acls']:
         backend_info, acls_list = prepare_backend_config_for_acls(data)
@@ -472,7 +472,7 @@ def generate_alteon_listen(data):
             listen_config.append(str(generate_content_class_config(backend_info, acls_list)))
     
     # Logging completion of listen configuration generation
-    logging.info(f"Completed generation of Alteon listen configuration for {data['name']}")
+    logging.info(f"Completed generation of Alteon listen configuration for {virt_name}")
     logging.info(f"Generated data (generate_alteon_listen): \n {listen_config}")
     return '\n'.join(listen_config)
 
@@ -484,7 +484,8 @@ def generate_alteon_frontend(data):
         logging.error("No bind IP provided in data.")
         return ""
 
-    config = generate_virtual_service_base(data['name'], vip_ip)
+    virt_name = data['name']
+    config = generate_virtual_service_base(virt_name, vip_ip)
     config += '\n'.join(generate_virtual_service_configs(data))
 
     for backend in data['use_backends']:
@@ -493,9 +494,32 @@ def generate_alteon_frontend(data):
     logging.info(f"Generated data (generate_alteon_frontend): \n{config}")
     return config
 
+def generate_backend_service_configs(virt_name, virt_port, service_type, backends):
+    """
+    Generate backend service configurations for virtual services.
+
+    Args:
+        virt_name (str): Name of the virtual service.
+        virt_port (int): Port number for the virtual service.
+        service_type (str): Type of service, such as HTTP or HTTPS.
+        backends (list): List of backend dictionaries, each containing 'backend', 'conditions', and 'associated_acls'.
+
+    Returns:
+        str: A string containing all the backend service configuration commands.
+    """
+    service_config = ''
+    for i, backend in enumerate(backends, 1):
+        service_config += f" /c/slb/virt {virt_name}/service {virt_port} {service_type}/cntrules {i}\n"
+        service_config += f" \tena\n"
+        service_config += f" \tcntclss \"{backend['backend']}\"\n"
+        service_config += f" \tgroup {backend['backend']}\n"
+
+    return service_config
+
+
 def prepare_backend_config_for_acls(data):
     # Extract the backend name
-    backend_name = data.get('default_backend', data['name'])
+    backend_name = data['default_backend'] if data.get('default_backend') is not None else data.get('name', None)
     if backend_name is None:
         return None, None
     
@@ -509,6 +533,11 @@ def prepare_backend_config_for_acls(data):
     }
 
     return backend_info, acls_list
+
+
+################################
+# Config Extractions functions #
+################################
 
 def parse_server_directive(server_string):
     # Parse a single server directive string to extract all relevant data
@@ -595,9 +624,75 @@ def parse_cookie_directive(line):
     }
     return cookie_data
 
-################################
-# Config Extractions functions #
-################################
+def parse_acl(line):
+    acl_match = re.search(r"acl\s+(\S+)\s+(.+)", line)
+    if acl_match:
+        acl_name = acl_match.group(1)
+        acl_condition = acl_match.group(2)
+        
+        # Match for various conditions
+        path_match = re.search(r"path\s+-i\s+(.+)", acl_condition)
+        path_beg_match = re.search(r"path_beg\s+(.+)", acl_condition)
+        path_end_match = re.search(r"path_end\s+(.+)", acl_condition)
+        host_match = re.search(r"hdr\(host\)\s+-i\s+(\S+)", acl_condition)
+
+        acl_entries = []
+        condition_type = None
+        path = None
+
+        # Determine the type of path match and extract path
+        if path_match:
+            path = path_match.group(1)
+            condition_type = 'path'
+        elif path_beg_match:
+            path = path_beg_match.group(1)
+            condition_type = 'path_beg'
+        elif path_end_match:
+            path = path_end_match.group(1)
+            condition_type = 'path_end'
+
+        # Handle path conditions
+        if path:
+            for segment in path.split():
+                clean_segment = segment.strip('/')
+                if clean_segment:
+                    acl_entries.append({
+                        'name': acl_name,
+                        'condition': {
+                            'type': condition_type,
+                            'path': clean_segment,
+                            'host': None
+                        }
+                    })
+                elif segment == '/':  # Log root path usage
+                    log_action(f"Root path '/' used in ACL named {acl_name}.", level='info')
+                    acl_entries.append({
+                        'name': acl_name,
+                        'condition': {
+                            'type': condition_type,
+                            'path': '/',
+                            'host': None
+                        }
+                    })
+
+        # Handle host conditions
+        if host_match:
+            hosts = host_match.group(1).split()
+            for host in hosts:
+                acl_entries.append({
+                    'name': acl_name,
+                    'condition': {
+                        'type': 'host',
+                        'path': None,
+                        'host': host
+                    }
+                })
+
+        if not acl_entries:
+            logging.warning(f"ACL configuration not supported or empty: '{line}'")
+            return None
+
+        return acl_entries if acl_entries else None
 
 def extract_frontend(section_content):
     logging.info("Processing 'frontend' directive")
@@ -677,23 +772,16 @@ def extract_frontend(section_content):
             backend_match = re.search(r"default_backend\s+(\S+)", line)
             if backend_match:
                 data['default_backend'] = backend_match.group(1)
-
+        # elif line.startswith('acl'):
+        #     acl_data = parse_acl(line)
+        #     if acl_data:
+        #         data['acls'].append(acl_data)
         elif line.startswith('acl'):
-            acl_match = re.search(r"acl\s+(\S+)\s+(.+)", line)
-            if acl_match:
-                acl_name = acl_match.group(1)
-                acl_condition = acl_match.group(2)
-                path_match = re.search(r"path_beg\s+(.+)", acl_condition)
-                host_match = re.search(r"hdr\(host\)\s+-i\s+(\S+)", acl_condition)
-                path = path_match.group(1) if path_match else None
-                host = host_match.group(1) if host_match else None
-                acl_dict[acl_name] = {'path': path, 'host': host}
-                data['acls'].append({'name': acl_name, 'condition': {
-                    'type': 'path_beg' if path_match else 'host header is',
-                    'path': path,
-                    'host': host
-                }})
-
+            acl_entries = parse_acl(line)
+            if acl_entries:  # acl_entries is a list of dictionaries
+                for entry in acl_entries:  # Iterate through the list
+                    data['acls'].append(entry)  # Append each dictionary to the 'acls' list in data
+                    acl_dict[entry['name']] = {'path': entry['condition']['path'], 'host': entry['condition']['host']}
         elif line.startswith('use_backend'):
             use_backend_match = re.search(r"use_backend\s+(\S+)\s+if\s+(.+)", line)
             if use_backend_match:
@@ -795,42 +883,12 @@ def extract_listen(section_content):
             if backend_match:
                 data['default_backend'] = backend_match.group(1)
         elif line.startswith('acl'):
-            acl_match = re.search(r"acl\s+(\S+)\s+(.+)", line)
-            if acl_match:
-                acl_name = acl_match.group(1)
-                acl_condition = acl_match.group(2)
-                # Match for various conditions
-                path_match = re.search(r"path\s+-i\s+(.+)", acl_condition)
-                path_beg_match = re.search(r"path_beg\s+(.+)", acl_condition)
-                path_end_match = re.search(r"path_end\s+(.+)", acl_condition)
-                host_match = re.search(r"hdr\(host\)\s+-i\s+(\S+)", acl_condition)
+            acl_entries = parse_acl(line)
+            if acl_entries:  # acl_entries is a list of dictionaries
+                for entry in acl_entries:  # Iterate through the list
+                    data['acls'].append(entry)  # Append each dictionary to the 'acls' list in data
 
-                # Determine the type of match
-                if path_match:
-                    path = path_match.group(1)
-                    condition_type = 'path'
-                elif path_beg_match:
-                    path = path_beg_match.group(1)
-                    condition_type = 'path_beg'
-                elif path_end_match:
-                    path = path_end_match.group(1)
-                    condition_type = 'path_end'
-                else:
-                    path = None
 
-                host = host_match.group(1) if host_match else None
-                if path or host:
-                    data['acls'].append({
-                        'name': acl_name,
-                        'condition': {
-                            'type': condition_type if path else 'host header',
-                            'path': path,
-                            'host': host
-                        }
-                    })
-                else:
-                    # Log the original line if no valid conditions are matched
-                    logging.warning(f"(extract_listen) acl configuration not supported: '{line}'")
         elif line.startswith('server') or line.startswith('#server'):
             server_info = parse_server_directive(line)
             if server_info:
