@@ -665,7 +665,7 @@ def parse_acl(line):
                         }
                     })
                 elif segment == '/':  # Log root path usage
-                    log_action(f"Root path '/' used in ACL named {acl_name}.", level='info')
+                    logging.warning(f"unhandled root path: '/' used in ACL named {acl_name}. ignoring..", level='info')
                     acl_entries.append({
                         'name': acl_name,
                         'condition': {
