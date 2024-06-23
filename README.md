@@ -1,4 +1,4 @@
-# Alteon from HAProxy Migraiton Tool
+# Alteon from HAProxy Migration Tool
 ## Introduction
 
 This **Command Line Interface (CLI) tool** is engineered to streamline the management of Alteon configurations by intelligently generating and applying configuration changes derived from existing HAProxy configuration files. It meticulously extracts settings from HAProxy configurations, transforms them into Alteon-specific commands, and facilitates the deployment of these configurations to an Alteon device through its REST API.
