@@ -116,8 +116,12 @@ def generate_virtual_service_configs(data, cert="WebManagementCert", ssl_pol="Ou
         service_config = ''
         if mode == 'TCP':
             service_type = 'basic-slb'
-            if (bind['port'] == '443' or bind['port'] == '80'):
-                log_action(f"Handle unsupported service: virt {data['name']} was defined as a TCP service but uses an application port {bind['port']}. No Virtual Service will be created.")
+            if (bind['port'] == '443'):
+                service_type = 'https'
+            elif (bind['port'] == '80'):
+                service_type = 'http'
+            #else:
+                #log_action(f"Handle unsupported service: virt {data['name']} was defined as a TCP service but uses port {bind['port']}. No Virtual Service will be created.")
         elif 'ssl' in bind['bind_options']:
             service_type = 'https'
             custom_ssl_pol_name, generated_ssl_pol_config = generate_ssl_policy_config(data['name'], bind)
