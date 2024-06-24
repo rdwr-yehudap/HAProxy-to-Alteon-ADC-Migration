@@ -18,10 +18,7 @@ The script is adept at creating a comprehensive array of both **Layer 4 (L4) and
 
 ### Logging and Error Handling
 
-In the pursuit of providing **transparent operations**, the tool is equipped with robust logging mechanisms. It meticulously logs into the `action.log` file any configurations it could not handle or apply. This logging provides detailed insights into areas that may require manual intervention or further investigation, which is crucial for troubleshooting. This feature ensures that network administrators are informed and can address any issues promptly.
-
-This tool not only automates the conversion of configuration settings but also ensures that they are optimized for deployment on Alteon load balancers. By leveraging this tool, network administrators can significantly reduce manual configuration efforts, minimize errors, and ensure consistent configurations across multiple devices.
-
+In the pursuit of providing **transparent operations**, the tool is equipped with robust logging mechanisms. It meticulously logs into the `action.log` file any configurations it could not handle or apply. This logging provides detailed insights into areas that may require manual intervention or further investigation.
 
 ## Requirements
 - Python 3.8 or higher
