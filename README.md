@@ -27,6 +27,7 @@ In the pursuit of providing **transparent operations**, the tool is equipped wit
   - `argparse` for command-line argument parsing.
   - `logging` for outputting logs.
   - `socket` for validating IP addresses or FQDNs.
+  - `ipaddress` for calculating IPs in CIDR subnets.
 
 To install the required Python packages, run:
 ```bash
@@ -57,10 +58,12 @@ python app.py <input_file> [-o OUTPUT_FILE] [-a ADDRESS] [-u USERNAME] [-p PASSW
 - `-u, --username`: Optional. Username for the Alteon device. Default is 'admin'.
 - `-p, --password`: Optional. Password for the Alteon device. Default is 'admin'.
 - `-pass, --passphrase`: Optional. Passphrase for additional security during REST API communication.
+- `-c, --cidr_networks`: Optional. Comma-separated list of CIDR IP networks to log servers that match them.
+- `--always-add-port`: Optional. Always add port to real server configurations.
 
 ### Example
 ```bash
-python app.py haproxy_config.txt -o alteon_config.txt -a 192.168.1.1 -u admin -p admin -pass passphrase
+python app.py haproxy_config.txt -o alteon_config.txt -a 192.168.1.1 -u admin -p password -pass passphrase -c 192.168.1.0/24,192.168.2.0/24
 ```
 
 ## Logging

@@ -8,6 +8,7 @@ import os
 from datetime import datetime
 import argparse
 import socket
+import ipaddress
 
 # Constant Definitions
 ACTION_LOG_NAME = 'action_logger'
@@ -21,6 +22,12 @@ always_add_port_to_real = False
 ####################
 # Helper functions #
 ####################
+
+def log_server_by_network(server_ip, virt_name, cidr_networks):
+    for network in cidr_networks:
+        if ipaddress.ip_address(server_ip) in network:
+            log_action(f"IP Found: Server IP {server_ip} in virt {virt_name} is within the CIDR network {network}.", level='info')
+            return
 
 def is_valid_address(value):
     """ Validate if the value is an IP address or FQDN """
@@ -701,7 +708,7 @@ def parse_acl(line):
 
         return acl_entries if acl_entries else None
 
-def extract_frontend(section_content):
+def extract_frontend(section_content, cidr_networks=[]):
     logging.info("Processing 'frontend' directive")
     data = {
         'name': "Unnamed listen section",  # Default name if not found
@@ -806,7 +813,7 @@ def extract_frontend(section_content):
     logging.info(f"Extracted frontend configuration: {str(data)}")
     return data
 
-def extract_listen(section_content):
+def extract_listen(section_content, cidr_networks=[]):
     logging.info("Processing 'listen' directive")
     data = {
         'name': "Unnamed listen section",  # Default name if not found
@@ -894,11 +901,10 @@ def extract_listen(section_content):
             if acl_entries:  # acl_entries is a list of dictionaries
                 for entry in acl_entries:  # Iterate through the list
                     data['acls'].append(entry)  # Append each dictionary to the 'acls' list in data
-
-
         elif line.startswith('server') or line.startswith('#server'):
             server_info = parse_server_directive(line)
             if server_info:
+                log_server_by_network(server_info['address'], data['name'], cidr_networks)
                 data['servers'].append(server_info)
             else:
                 logging.warning(f"couldn't parse server config: '{original_line}'")  # Log non-matched lines    
@@ -908,9 +914,12 @@ def extract_listen(section_content):
     logging.info(f"Extracted listen configuration: {data}")
     return data
 
-def extract_backend(section_content):
+def extract_backend(section_content, cidr_networks=[]):
     logging.info("Processing 'backend' directive")
-    data = {}
+    data = {
+        'name': "Unnamed backend",
+        'servers': [],
+    }
 
     # Regex to extract the name of the backend
     name_pattern = re.compile(r"^backend\s+(\S+)")
@@ -921,7 +930,12 @@ def extract_backend(section_content):
     server_lines = section_content.splitlines()
     servers = [parse_server_directive(line) for line in server_lines if line.strip().startswith("server") or line.startswith('#server')]
 
-    data['servers'] = [server for server in servers if server is not None]
+    for server in servers:
+        if server:
+            log_server_by_network(server['address'], data['name'], cidr_networks)
+            data['servers'].append(server)
+
+    #data['servers'] = [server for server in servers if server is not None]
 
     # Extract balance method
     balance_pattern = re.compile(r"balance\s+(\S+)")
@@ -931,7 +945,7 @@ def extract_backend(section_content):
     logging.info(f"Extracted backend configuration: {data}")
     return data
 
-def extract_config(input_file_path, output_file_path):
+def extract_config(input_file_path, output_file_path, cidr_networks):
     new_line = 'listen dummy_radware_do_not_remove'
 
     # Read the file and check if the line already exists
@@ -993,7 +1007,7 @@ def extract_config(input_file_path, output_file_path):
 
         # Apply the handler function based on the directive
         if directive in handler_functions:
-            processed_content = handler_functions[directive](section_content)
+            processed_content = handler_functions[directive](section_content, cidr_networks)
             # Generate Alteon config for the processed content
             alteon_config = alteon_config_generators[directive](processed_content)
             config_sections[key] = alteon_config
@@ -1123,7 +1137,8 @@ def main():
     parser.add_argument('-p', '--password', type=str, default='admin', help='Password for the Alteon device.')
     parser.add_argument('-pass', '--passphrase', type=str, default='passphrase', help='Passphrase for additional security measures.')
     parser.add_argument('--always-add-port', dest='always_add_port', action='store_true', help='Always add port to real server configurations.')
-    
+    parser.add_argument('-c', '--cidr_networks', type=str, help='Comma-separated list of CIDR IP networks to log servers that match them.')
+
     args = parser.parse_args()
 
     global always_add_port_to_real
@@ -1132,9 +1147,20 @@ def main():
     # Set up logging
     setup_logging()
 
+    # Convert CIDR networks to list
+    cidr_networks = []
+    if args.cidr_networks:
+        cidr_list = args.cidr_networks.split(',')
+        for cidr in cidr_list:
+            try:
+                network = ipaddress.ip_network(cidr)
+                cidr_networks.append(network)
+            except ValueError as e:
+                logging.error(f"Invalid CIDR network '{cidr}': {e}")
+
     # Extract and process configuration
     try:
-        result_counters, result_config = extract_config(args.input_file, args.output_file)
+        result_counters, result_config = extract_config(args.input_file, args.output_file, cidr_networks)
         result_string = '\n'.join(result_config.values())
     except Exception as e:
         print(f"Failed to process configuration: {e}")
