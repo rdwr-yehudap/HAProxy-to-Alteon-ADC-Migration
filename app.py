@@ -159,7 +159,10 @@ def generate_virtual_service_configs(data, cert="WebManagementCert", ssl_pol="Ou
                 if backend_info is not None and acls_list is not None:
                     service_config += generate_backend_service_configs(data['name'], bind['port'], service_type, [backend_info])
         elif 'use_backends' in data and len(data['use_backends']) > 0:
+            service_config += f" \taction discard\n"
             service_config += generate_backend_service_configs(data['name'], bind['port'], service_type, data['use_backends'])
+        else:
+            service_config += f" \taction discard\n"
 
         # Generate a random 8-character prefix
         random_prefix = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
@@ -230,7 +233,7 @@ def generate_content_class_config(backend, acls):
         if acl['name'] in backend['conditions']:
             condition = acl['condition']
             if 'host' in condition and condition['host'] != None:
-                class_config += f"/c/slb/layer7/slb/cntclss {backend['backend']} http/header {header_count}\n"
+                class_config += f"/c/slb/layer7/slb/cntclss {backend['backend'][:31]} http/header {header_count}\n"
                 class_config += f" \t header NAME=host \"VALUE={condition['host']}\"\n"
                 class_config += f" \t match NAME=include \"VALUE=equal\"\n"
                 header_count += 1
@@ -241,7 +244,7 @@ def generate_content_class_config(backend, acls):
                 elif condition['type'] == 'path_end':
                     match_type = "sufx"
 
-                class_config += f"/c/slb/layer7/slb/cntclss {backend['backend']} http/path {path_count}\n"
+                class_config += f"/c/slb/layer7/slb/cntclss {backend['backend'][:31]} http/path {path_count}\n"
                 class_config += f" \t path \"{condition['path']}\"\n"
                 class_config += f" \t match {match_type}\n"
                 path_count += 1
@@ -363,7 +366,7 @@ def generate_healthcheck(group_name, server_options):
 
     return healthcheck_lines
 
-def generate_group_config(group_name, servers, is_backup=False, balance='default'):
+def generate_group_config(group_name, servers, backup_group_name=None, balance='default'):
     """Generate configuration for a group of servers including health checks and optional balance settings."""
     group_config_lines = []
     health_check_configured = False
@@ -383,10 +386,9 @@ def generate_group_config(group_name, servers, is_backup=False, balance='default
     # Link health check to the group
     group_config_lines.append(f" \t health {group_name}_hc")
 
-    # Specify the group as a backup group if it's a backup
-    if is_backup:
-        backup_group_name = f"backup_{group_name}"
-        group_config_lines.append(f" \t backup {backup_group_name}")
+    # Specify the group as a backup group if backup_group_name is provided
+    if backup_group_name:
+        group_config_lines.append(f" \t backup g{backup_group_name}")
 
     # Check for uniform port across all servers
     unique_ports = set(server.get('port') for server in servers if 'port' in server)
@@ -424,14 +426,15 @@ def generate_alteon_backend(data):
     primary_servers = [s for s in data['servers'] if 'backup' not in s.get('server_options', {})]
     backup_servers = [s for s in data['servers'] if 'backup' in s.get('server_options', {})]
     
-    # Generate configurations for primary and backup groups
-    primary_group_config = generate_group_config(group_name, primary_servers, is_backup=False)
-    config_lines.extend(primary_group_config)
-    
+    backup_group_name = None
     if backup_servers:
         backup_group_name = f"backup_{group_name}"
-        backup_group_config = generate_group_config(backup_group_name, backup_servers, is_backup=True)
+        backup_group_config = generate_group_config(backup_group_name, backup_servers)
         config_lines.extend(backup_group_config)
+        
+
+    primary_group_config = generate_group_config(group_name, primary_servers, backup_group_name)
+    config_lines.extend(primary_group_config)
     
     logging.info("Completed generation of Alteon backend config")
     return '\n'.join(config_lines)
@@ -460,14 +463,14 @@ def generate_alteon_listen(data):
         primary_servers = [s for s in data['servers'] if 'backup' not in s.get('server_options', {})]
         backup_servers = [s for s in data['servers'] if 'backup' in s.get('server_options', {})]
 
-        if primary_servers:
-            primary_group_config = generate_group_config(group_name, primary_servers, is_backup=False, balance=balance)
-            listen_config.extend(primary_group_config)
-
+        backup_group_name = None
         if backup_servers:
             backup_group_name = f"backup_{group_name}"
-            backup_group_config = generate_group_config(backup_group_name, backup_servers, is_backup=True, balance=balance)
+            backup_group_config = generate_group_config(backup_group_name, backup_servers, balance=balance)
             listen_config.extend(backup_group_config)
+
+        primary_group_config = generate_group_config(group_name, primary_servers, backup_group_name=backup_group_name, balance=balance)
+        listen_config.extend(primary_group_config)
 
     # Handle unsupported configurations and log them
     if data.get('maxconn'):
