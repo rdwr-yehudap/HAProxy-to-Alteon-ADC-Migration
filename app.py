@@ -226,7 +226,7 @@ def generate_ssl_policy_config(name, bind):
     return composite_name, ssl_policy_config
 
 def generate_content_class_config(backend, acls):
-    class_config = f"/c/slb/layer7/slb/cntclss {backend['backend']} http\n"
+    class_config = f"/c/slb/layer7/slb/cntclss {backend['backend'][:31]} http\n"
     header_count = 1
     path_count = 1
     for acl in acls:
