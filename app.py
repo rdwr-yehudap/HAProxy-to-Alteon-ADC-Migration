@@ -530,7 +530,7 @@ def generate_backend_service_configs(virt_name, virt_port, service_type, backend
     for i, backend in enumerate(backends, 1):
         service_config += f" /c/slb/virt {virt_name}/service {virt_port} {service_type}/cntrules {i}\n"
         service_config += f" \tena\n"
-        service_config += f" \tcntclss \"{backend['backend']}\"\n"
+        service_config += f" \tcntclss \"{backend['backend'][:31]}\"\n"
         service_config += f" \tgroup {backend['backend']}\n"
 
     return service_config
