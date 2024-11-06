@@ -648,9 +648,9 @@ def parse_acl(line):
         acl_condition = acl_match.group(2)
         
         # Match for various conditions
-        path_match = re.search(r"path\s+-i\s+(.+)", acl_condition)
-        path_beg_match = re.search(r"path_beg\s+(.+)", acl_condition)
-        path_end_match = re.search(r"path_end\s+(.+)", acl_condition)
+        path_match = re.search(r"path\s+-?i?\s+(.+)", acl_condition)
+        path_beg_match = re.search(r"path_beg\s+-?i?\s+(.+)", acl_condition)
+        path_end_match = re.search(r"path_end\s+-?i?\s+(.+)", acl_condition)
         host_match = re.search(r"hdr\(host\)\s+-i\s+(\S+)", acl_condition)
 
         acl_entries = []

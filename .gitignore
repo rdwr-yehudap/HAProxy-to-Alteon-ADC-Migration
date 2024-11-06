@@ -134,3 +134,4 @@ logs/
 
 # Exclude vscode launch.json
 launch.json
+*.docx
