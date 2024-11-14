@@ -931,7 +931,7 @@ def extract_backend(section_content, cidr_networks=[]):
 
     # Iterate over server lines
     server_lines = section_content.splitlines()
-    servers = [parse_server_directive(line) for line in server_lines if line.strip().startswith("server") or line.startswith('#server')]
+    servers = [parse_server_directive(line.strip()) for line in server_lines if line.strip().startswith("server") or line.strip().startswith('#server')]
 
     for server in servers:
         if server:
