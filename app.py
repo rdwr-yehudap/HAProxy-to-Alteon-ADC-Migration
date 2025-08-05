@@ -12,6 +12,8 @@ import ipaddress
 
 # Constant Definitions
 ACTION_LOG_NAME = 'action_logger'
+HAP_PREFIX = 'HAP-'
+MAX_ID_LENGTH = 32
 
 https_url_prefix = "https://"
 content_type = "application/json;charset=UTF-8"
@@ -100,9 +102,32 @@ def log_action(message, level='info'):
 # Config Generation functions #
 ###############################
 
+def ensure_hap_prefix_length(name, prefix=HAP_PREFIX):
+    """
+    Ensure the name has HAP- prefix and doesn't exceed MAX_ID_LENGTH characters.
+    If the prefixed name is too long, truncate the original name.
+    """
+    if name.startswith(prefix):
+        # Already has prefix, check length
+        if len(name) <= MAX_ID_LENGTH:
+            return name
+        # Truncate to fit within limit
+        return name[:MAX_ID_LENGTH]
+    
+    # Add prefix
+    prefixed_name = prefix + name
+    if len(prefixed_name) <= MAX_ID_LENGTH:
+        return prefixed_name
+    
+    # Truncate original name to fit with prefix
+    max_name_length = MAX_ID_LENGTH - len(prefix)
+    return prefix + name[:max_name_length]
+
 def generate_virtual_service_base(name, vip_ip):
+    # Add HAP- prefix to virtual service name
+    virt_name = ensure_hap_prefix_length(name)
     base_config = (
-        f"/c/slb/virt {name}\n"
+        f"/c/slb/virt {virt_name}\n"
         f" \t ena\n"
         f" \t ipver v4\n"
         f" \t vip {vip_ip}\n"
@@ -112,6 +137,9 @@ def generate_virtual_service_base(name, vip_ip):
 def generate_virtual_service_configs(data, cert="WebManagementCert", ssl_pol="Outbound_FE_SSL_Inspection"):
     # List to hold all configurations for each bind
     all_configs = []
+
+    # Add HAP- prefix to virtual service name
+    virt_name = ensure_hap_prefix_length(data['name'])
 
     # Extract mode from data, default to None if not provided
     mode = data.get('mode')
@@ -136,31 +164,33 @@ def generate_virtual_service_configs(data, cert="WebManagementCert", ssl_pol="Ou
                 service_config += generated_ssl_pol_config
                 ssl_pol = custom_ssl_pol_name
 
-            service_config += f"/c/slb/virt {data['name']}/service {bind['port']} {service_type}/ssl\n"
+            service_config += f"/c/slb/virt {virt_name}/service {bind['port']} {service_type}/ssl\n"
             service_config += f" \t srvrcert cert {cert}\n"
             service_config += f" \t sslpol {ssl_pol}\n"
             
-            log_action(f"Check certificate: configured certificate {cert} for virt {data['name']}, original bind options are {bind['bind_options']}")
+            log_action(f"Check certificate: configured certificate {cert} for virt {virt_name}, original bind options are {bind['bind_options']}")
         else:
             service_type = 'http'
 
-        service_config += f"/c/slb/virt {data['name']}/service {bind['port']} {service_type}\n"
+        service_config += f"/c/slb/virt {virt_name}/service {bind['port']} {service_type}\n"
         server_ports = [server['port'] for server in data.get('servers', [])]
         unique_ports = set(server_ports)
         rport = unique_ports.pop() if len(unique_ports) == 1 else 0
         service_config += f" \t rport {rport}\n"
 
         if 'default_backend' in data and data['default_backend'] != None:
-            service_config += f" \tgroup {data['default_backend']}\n"
+            group_name = ensure_hap_prefix_length(data['default_backend'])
+            service_config += f" \tgroup {group_name}\n"
         elif 'servers' in data and len(data['servers']) > 0:
-            service_config += f" \tgroup {data['name']}\n"
+            group_name = ensure_hap_prefix_length(data['name'])
+            service_config += f" \tgroup {group_name}\n"
             if len(data['acls']) > 0:
                 backend_info, acls_list = prepare_backend_config_for_acls(data)
                 if backend_info is not None and acls_list is not None:
-                    service_config += generate_backend_service_configs(data['name'], bind['port'], service_type, [backend_info])
+                    service_config += generate_backend_service_configs(virt_name, bind['port'], service_type, [backend_info])
         elif 'use_backends' in data and len(data['use_backends']) > 0:
             service_config += f" \taction discard\n"
-            service_config += generate_backend_service_configs(data['name'], bind['port'], service_type, data['use_backends'])
+            service_config += generate_backend_service_configs(virt_name, bind['port'], service_type, data['use_backends'])
         else:
             service_config += f" \taction discard\n"
 
@@ -175,7 +205,7 @@ def generate_virtual_service_configs(data, cert="WebManagementCert", ssl_pol="Ou
 
         if http_mods_config != '':
             service_config += http_mods_config
-            service_config += f"/c/slb/virt {data['name']}/service {bind['port']} {service_type}/http\n"
+            service_config += f"/c/slb/virt {virt_name}/service {bind['port']} {service_type}/http\n"
             service_config += f" \t httpmod {mod_name}\n"
         
         if 'options' in data and 'forwardfor' in data['options']:
@@ -184,11 +214,11 @@ def generate_virtual_service_configs(data, cert="WebManagementCert", ssl_pol="Ou
         if 'cookies' in data:
             for cookie in data['cookies']:
                 if cookie['action'] == 'insert':
-                    service_config += f"/c/slb/virt {data['name']}/service {bind['port']} {service_type}/pbind cookie insert \"{cookie['value']}\"\n"
+                    service_config += f"/c/slb/virt {virt_name}/service {bind['port']} {service_type}/pbind cookie insert \"{cookie['value']}\"\n"
                 elif cookie['action'] == 'passive':
-                    service_config += f"/c/slb/virt {data['name']}/service {bind['port']} {service_type}/pbind cookie passive \"{cookie['value']}\" 1 16 disable\n"
+                    service_config += f"/c/slb/virt {virt_name}/service {bind['port']} {service_type}/pbind cookie passive \"{cookie['value']}\" 1 16 disable\n"
                 elif cookie['action'] == 'rewrite':
-                    service_config += f"/c/slb/virt {data['name']}/service {bind['port']} {service_type}/pbind cookie rewrite \"{cookie['value']}\" disable\n"
+                    service_config += f"/c/slb/virt {virt_name}/service {bind['port']} {service_type}/pbind cookie rewrite \"{cookie['value']}\" disable\n"
              
         # Append the configuration for this bind to the list
         all_configs.append(service_config)
@@ -216,6 +246,9 @@ def generate_ssl_policy_config(name, bind):
         # Create a composite name without the interface name
         composite_name = f"{name}_pol"
     
+    # Ensure HAP- prefix and length limits
+    composite_name = ensure_hap_prefix_length(composite_name)
+    
     # Generate the Alteon SSL policy configuration
     ssl_policy_config = (
         f"/c/slb/ssl/sslpol {composite_name}\n"
@@ -226,14 +259,16 @@ def generate_ssl_policy_config(name, bind):
     return composite_name, ssl_policy_config
 
 def generate_content_class_config(backend, acls):
-    class_config = f"/c/slb/layer7/slb/cntclss {backend['backend'][:31]} http\n"
+    # Add HAP- prefix to content class name
+    class_name = ensure_hap_prefix_length(backend['backend'])
+    class_config = f"/c/slb/layer7/slb/cntclss {class_name} http\n"
     header_count = 1
     path_count = 1
     for acl in acls:
         if acl['name'] in backend['conditions']:
             condition = acl['condition']
             if 'host' in condition and condition['host'] != None:
-                class_config += f"/c/slb/layer7/slb/cntclss {backend['backend'][:31]} http/header {header_count}\n"
+                class_config += f"/c/slb/layer7/slb/cntclss {class_name} http/header {header_count}\n"
                 class_config += f" \t header NAME=host \"VALUE={condition['host']}\"\n"
                 class_config += f" \t match NAME=include \"VALUE=equal\"\n"
                 header_count += 1
@@ -244,7 +279,7 @@ def generate_content_class_config(backend, acls):
                 elif condition['type'] == 'path_end':
                     match_type = "sufx"
 
-                class_config += f"/c/slb/layer7/slb/cntclss {backend['backend'][:31]} http/path {path_count}\n"
+                class_config += f"/c/slb/layer7/slb/cntclss {class_name} http/path {path_count}\n"
                 class_config += f" \t path \"{condition['path']}\"\n"
                 class_config += f" \t match {match_type}\n"
                 path_count += 1
@@ -330,6 +365,9 @@ def generate_server_config(server, default_port=None):
     if not add_port_to_real:
         server_name = server['address']
 
+    # Add HAP- prefix to server name
+    server_name = ensure_hap_prefix_length(server_name)
+
     server_lines = []
     
     # Server block start
@@ -351,8 +389,10 @@ def generate_server_config(server, default_port=None):
 
 def generate_healthcheck(group_name, server_options):
     """Generate health check based on server options."""
+    # Add HAP- prefix to healthcheck name
+    hc_name = ensure_hap_prefix_length(f"{group_name}_hc")
     healthcheck_lines = [
-        f"/c/slb/advhc/health {group_name}_hc TCP"
+        f"/c/slb/advhc/health {hc_name} TCP"
     ]
     
     # Only 'inter' is supported for interval
@@ -371,6 +411,9 @@ def generate_group_config(group_name, servers, backup_group_name=None, balance='
     group_config_lines = []
     health_check_configured = False
 
+    # Add HAP- prefix to group name
+    group_name = ensure_hap_prefix_length(group_name)
+
     # Start configuration for the group
     group_config_lines.append(f"/c/slb/group {group_name}")
     group_config_lines.append(f" \t ipver v4")
@@ -383,11 +426,13 @@ def generate_group_config(group_name, servers, backup_group_name=None, balance='
     elif balance != 'default':
         logging.warning(f"Balance method '{balance}' is specified but not supported. No balance configuration applied.")
 
-    # Link health check to the group
-    group_config_lines.append(f" \t health {group_name}_hc")
+    # Link health check to the group - ensure HAP- prefix for healthcheck name
+    hc_name = ensure_hap_prefix_length(f"{group_name.replace(HAP_PREFIX, '')}_hc")
+    group_config_lines.append(f" \t health {hc_name}")
 
     # Specify the group as a backup group if backup_group_name is provided
     if backup_group_name:
+        backup_group_name = ensure_hap_prefix_length(backup_group_name)
         group_config_lines.append(f" \t backup g{backup_group_name}")
 
     # Check for uniform port across all servers
@@ -401,7 +446,9 @@ def generate_group_config(group_name, servers, backup_group_name=None, balance='
         # if there is a common port we won't add port to the real, and will configure it on the service
         if common_port != None and not always_add_port_to_real:
             server_name = server['address']
-            
+        
+        # Add HAP- prefix to server name
+        server_name = ensure_hap_prefix_length(server_name)
         group_config_lines.append(f" \t add {server_name}")
         # Generate server configuration considering common port
     
@@ -411,7 +458,7 @@ def generate_group_config(group_name, servers, backup_group_name=None, balance='
 
     # Generate health check only once based on the first server's options
     if servers and 'server_options' in servers[0] and not health_check_configured:
-        health_check_lines = generate_healthcheck(group_name, servers[0]['server_options'])
+        health_check_lines = generate_healthcheck(group_name.replace(HAP_PREFIX, ''), servers[0]['server_options'])
         group_config_lines.extend(health_check_lines)
         health_check_configured = True
 
@@ -473,17 +520,18 @@ def generate_alteon_listen(data):
         listen_config.extend(primary_group_config)
 
     # Handle unsupported configurations and log them
+    virt_name_with_prefix = ensure_hap_prefix_length(virt_name)
     if data.get('maxconn'):
         logging.warning(f"Maxconn '{data['maxconn']}' specified but not handled directly in Alteon config.")
     if data['redirects']:
-        logging.warning(f"Redirects specified but not handled. skipping redirect for {str(data['redirects'])} virt {virt_name} ")
-        log_action(f"Add redirect: virt {virt_name} has unhandled redirect rule {str(data['redirects'])}")
+        logging.warning(f"Redirects specified but not handled. skipping redirect for {str(data['redirects'])} virt {virt_name_with_prefix} ")
+        log_action(f"Add redirect: virt {virt_name_with_prefix} has unhandled redirect rule {str(data['redirects'])}")
     if data['compression']:
         logging.warning(f"Compression settings specified but not handled: {data['compression']}")
-        log_action(f"Add compression: virt {virt_name} has unhandled compression setting {data['compression']}")
+        log_action(f"Add compression: virt {virt_name_with_prefix} has unhandled compression setting {data['compression']}")
     if data['stick_tables']:
         logging.warning("Stick tables specified but not handled.")
-        log_action(f"Add persistency: virt {virt_name} has unhandled stick_table setting {data['stick_tables']}")
+        log_action(f"Add persistency: virt {virt_name_with_prefix} has unhandled stick_table setting {data['stick_tables']}")
     
     if data['acls']:
         backend_info, acls_list = prepare_backend_config_for_acls(data)
@@ -491,7 +539,7 @@ def generate_alteon_listen(data):
             listen_config.append(str(generate_content_class_config(backend_info, acls_list)))
     
     # Logging completion of listen configuration generation
-    logging.info(f"Completed generation of Alteon listen configuration for {virt_name}")
+    logging.info(f"Completed generation of Alteon listen configuration for {virt_name_with_prefix}")
     logging.info(f"Generated data (generate_alteon_listen): \n {listen_config}")
     return '\n'.join(listen_config)
 
@@ -528,10 +576,12 @@ def generate_backend_service_configs(virt_name, virt_port, service_type, backend
     """
     service_config = ''
     for i, backend in enumerate(backends, 1):
+        # Add HAP- prefix to backend group name
+        backend_group = ensure_hap_prefix_length(backend['backend'])
         service_config += f" /c/slb/virt {virt_name}/service {virt_port} {service_type}/cntrules {i}\n"
         service_config += f" \tena\n"
-        service_config += f" \tcntclss \"{backend['backend'][:31]}\"\n"
-        service_config += f" \tgroup {backend['backend']}\n"
+        service_config += f" \tcntclss \"{backend_group}\"\n"
+        service_config += f" \tgroup {backend_group}\n"
 
     return service_config
 
@@ -544,9 +594,9 @@ def prepare_backend_config_for_acls(data):
     # Extract ACLs directly from the data
     acls_list = data['acls']
 
-    # Prepare the backend info
+    # Prepare the backend info with HAP- prefix
     backend_info = {
-        'backend': backend_name,
+        'backend': backend_name,  # Will be prefixed in generate_content_class_config
         'conditions': ' '.join(acl['name'] for acl in acls_list)  # All ACL names concatenated with spaces
     }
 
