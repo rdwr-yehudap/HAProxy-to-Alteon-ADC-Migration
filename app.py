@@ -21,6 +21,9 @@ accept_encoding = "gzip, deflate, br"
 log_file_path = 'application.log'
 always_add_port_to_real = False
 
+# Global variable to track SSL verify servers for backend SSL configuration
+ssl_verify_backends = set()
+
 ####################
 # Helper functions #
 ####################
@@ -134,7 +137,7 @@ def generate_virtual_service_base(name, vip_ip):
     )
     return base_config
 
-def generate_virtual_service_configs(data, cert="WebManagementCert", ssl_pol="Outbound_FE_SSL_Inspection"):
+def generate_virtual_service_configs(data, cert="WebManagementCert", ssl_pol="Outbound_FE_SSL_Inspection", proxy_ip=None):
     # List to hold all configurations for each bind
     all_configs = []
 
@@ -159,7 +162,7 @@ def generate_virtual_service_configs(data, cert="WebManagementCert", ssl_pol="Ou
                 #log_action(f"Handle unsupported service: virt {data['name']} was defined as a TCP service but uses port {bind['port']}. No Virtual Service will be created.")
         elif 'ssl' in bind['bind_options']:
             service_type = 'https'
-            custom_ssl_pol_name, generated_ssl_pol_config = generate_ssl_policy_config(data['name'], bind)
+            custom_ssl_pol_name, generated_ssl_pol_config = generate_ssl_policy_config(data['name'], bind, data)
             if custom_ssl_pol_name:
                 service_config += generated_ssl_pol_config
                 ssl_pol = custom_ssl_pol_name
@@ -219,13 +222,34 @@ def generate_virtual_service_configs(data, cert="WebManagementCert", ssl_pol="Ou
                     service_config += f"/c/slb/virt {virt_name}/service {bind['port']} {service_type}/pbind cookie passive \"{cookie['value']}\" 1 16 disable\n"
                 elif cookie['action'] == 'rewrite':
                     service_config += f"/c/slb/virt {virt_name}/service {bind['port']} {service_type}/pbind cookie rewrite \"{cookie['value']}\" disable\n"
+        
+        # Add proxy IP configuration if provided
+        if proxy_ip and service_type in ['http', 'https']:
+            service_config += f"/c/slb/virt {virt_name}/service {bind['port']} {service_type}\n"
+            service_config += f" \t dbind forceproxy\n"
+            # Parse proxy IP to get IP and subnet mask
+            if '/' in proxy_ip:
+                ip, cidr = proxy_ip.split('/')
+                # Convert CIDR to subnet mask
+                cidr_int = int(cidr)
+                mask = (0xffffffff >> (32 - cidr_int)) << (32 - cidr_int)
+                subnet_mask = f"{(mask >> 24) & 0xff}.{(mask >> 16) & 0xff}.{(mask >> 8) & 0xff}.{mask & 0xff}"
+            else:
+                ip = proxy_ip
+                subnet_mask = "255.255.255.255"
+            
+            service_config += f"/c/slb/virt {virt_name}/service {bind['port']} {service_type}/pip\n"
+            service_config += f" \t mode address\n"
+            service_config += f" \t addr v4 {ip} {subnet_mask} persist disable\n"
              
         # Append the configuration for this bind to the list
         all_configs.append(service_config)
 
     return all_configs
 
-def generate_ssl_policy_config(name, bind):
+def generate_ssl_policy_config(name, bind, data=None):
+    global ssl_verify_backends
+    
     # Extract the ciphers from the bind options
     bind_options = bind['bind_options']
     ciphers_match = re.search(r'ciphers\s([^\s]+)', bind_options)
@@ -255,6 +279,38 @@ def generate_ssl_policy_config(name, bind):
         f" \t cipher user-defined-expert \"{ciphers}\"\n"
         f" \t ena\n"
     )
+    
+    # Check if any backend used by this frontend has SSL verify servers
+    has_ssl_verify_servers = False
+    if data:
+        # Check direct servers (for listen sections) - only check enabled servers
+        if data.get('servers'):
+            for server in data['servers']:
+                # Only check enabled servers (skip disabled ones)
+                if not server.get('disabled', False) and 'server_options' in server:
+                    for option_key in server['server_options']:
+                        if 'ssl verify' in option_key:
+                            has_ssl_verify_servers = True
+                            break
+                    if has_ssl_verify_servers:
+                        break
+        
+        # Check default backend
+        if not has_ssl_verify_servers and data.get('default_backend') and data['default_backend'] in ssl_verify_backends:
+            has_ssl_verify_servers = True
+        
+        # Check use_backends
+        if not has_ssl_verify_servers and data.get('use_backends'):
+            for backend_info in data['use_backends']:
+                if backend_info['backend'] in ssl_verify_backends:
+                    has_ssl_verify_servers = True
+                    break
+    
+    # Add backend SSL if any referenced backend has SSL verify servers
+    if has_ssl_verify_servers:
+        ssl_policy_config += f"/c/slb/ssl/sslpol {composite_name}/backend\n"
+        ssl_policy_config += f" \t ssl enabled\n"
+        logging.info(f"Added backend SSL to SSL policy {composite_name} due to SSL verify servers in referenced backends")
     
     return composite_name, ssl_policy_config
 
@@ -486,7 +542,7 @@ def generate_alteon_backend(data):
     logging.info("Completed generation of Alteon backend config")
     return '\n'.join(config_lines)
 
-def generate_alteon_listen(data):
+def generate_alteon_listen(data, proxy_ip=None):
     logging.info(f"Received data (generate_alteon_listen): {data}")
 
     listen_config = []
@@ -499,7 +555,7 @@ def generate_alteon_listen(data):
         return ""
     virt_name = data['name']
     listen_config.append(generate_virtual_service_base(virt_name, vip_ip))
-    listen_config.extend(generate_virtual_service_configs(data))
+    listen_config.extend(generate_virtual_service_configs(data, proxy_ip=proxy_ip))
 
     # Determine the balance strategy to use for the server groups
     balance = data.get('balance', 'default')  # Use 'default' if balance is not specified
@@ -543,7 +599,7 @@ def generate_alteon_listen(data):
     logging.info(f"Generated data (generate_alteon_listen): \n {listen_config}")
     return '\n'.join(listen_config)
 
-def generate_alteon_frontend(data):
+def generate_alteon_frontend(data, proxy_ip=None):
     logging.info(f"Received data (generate_alteon_frontend): {data}")
 
     vip_ip = data['bind'][0]['ip'] if data['bind'] else None  # Assumes all binds are on the same IP
@@ -553,10 +609,16 @@ def generate_alteon_frontend(data):
 
     virt_name = data['name']
     config = generate_virtual_service_base(virt_name, vip_ip)
-    config += '\n'.join(generate_virtual_service_configs(data))
+    config += '\n'.join(generate_virtual_service_configs(data, proxy_ip=proxy_ip))
 
     for backend in data['use_backends']:
         config += generate_content_class_config(backend, data['acls'])
+    
+    # Generate content rules for use_backends
+    if data['use_backends']:
+        for bind in data['bind']:
+            service_type = 'https' if 'ssl' in bind['bind_options'] else 'http'
+            config += generate_backend_service_configs(virt_name, bind['port'], service_type, data['use_backends'])
 
     logging.info(f"Generated data (generate_alteon_frontend): \n{config}")
     return config
@@ -575,10 +637,13 @@ def generate_backend_service_configs(virt_name, virt_port, service_type, backend
         str: A string containing all the backend service configuration commands.
     """
     service_config = ''
-    for i, backend in enumerate(backends, 1):
+    for i, backend in enumerate(backends):
+        rule_id = (i + 1) * 5  # Start from 5, increment by 5 (5, 10, 15, etc.)
         # Add HAP- prefix to backend group name
         backend_group = ensure_hap_prefix_length(backend['backend'])
-        service_config += f" /c/slb/virt {virt_name}/service {virt_port} {service_type}/cntrules {i}\n"
+        # Ensure virt_name has HAP- prefix
+        virt_name_prefixed = ensure_hap_prefix_length(virt_name)
+        service_config += f" /c/slb/virt {virt_name_prefixed}/service {virt_port} {service_type}/cntrules {rule_id}\n"
         service_config += f" \tena\n"
         service_config += f" \tcntclss \"{backend_group}\"\n"
         service_config += f" \tgroup {backend_group}\n"
@@ -968,6 +1033,7 @@ def extract_listen(section_content, cidr_networks=[]):
     return data
 
 def extract_backend(section_content, cidr_networks=[]):
+    global ssl_verify_backends
     logging.info("Processing 'backend' directive")
     data = {
         'name': "Unnamed backend",
@@ -983,10 +1049,22 @@ def extract_backend(section_content, cidr_networks=[]):
     server_lines = section_content.splitlines()
     servers = [parse_server_directive(line.strip()) for line in server_lines if line.strip().startswith("server") or line.strip().startswith('#server')]
 
+    # Check for SSL verify servers and add backend to global set - only check enabled servers
+    has_ssl_verify = False
     for server in servers:
         if server:
             log_server_by_network(server['address'], data['name'], cidr_networks)
             data['servers'].append(server)
+            # Check if this server has SSL verify - only for enabled servers
+            if not server.get('disabled', False) and 'server_options' in server:
+                for option_key in server['server_options']:
+                    if 'ssl verify' in option_key:
+                        has_ssl_verify = True
+                        break
+    
+    if has_ssl_verify:
+        ssl_verify_backends.add(data['name'])
+        logging.info(f"Backend {data['name']} has SSL verify servers, added to SSL verify backends list")
 
     #data['servers'] = [server for server in servers if server is not None]
 
@@ -998,7 +1076,10 @@ def extract_backend(section_content, cidr_networks=[]):
     logging.info(f"Extracted backend configuration: {data}")
     return data
 
-def extract_config(input_file_path, output_file_path, cidr_networks):
+def extract_config(input_file_path, output_file_path, cidr_networks, proxy_ip=None):
+    global ssl_verify_backends
+    ssl_verify_backends.clear()  # Clear global SSL verify backends list for new configuration
+    
     new_line = 'listen dummy_radware_do_not_remove'
 
     # Read the file and check if the line already exists
@@ -1050,19 +1131,28 @@ def extract_config(input_file_path, output_file_path, cidr_networks):
     }
 
     directive_counters = {'listen': 0, 'frontend': 0, 'backend': 0}
+    all_matches = list(active_matches)
     
-    for match in active_matches:
+    # First pass: Process backends to collect SSL verify information
+    for match in all_matches:
         directive = match.group(1).lower()
-        directive_counters[directive] += 1  # Increment the respective directive counter
-
-        key = f"{directive} {match.group(2)}"
-        section_content = match.group(0).strip()
-
-        # Apply the handler function based on the directive
-        if directive in handler_functions:
+        if directive == 'backend':
+            directive_counters[directive] += 1
+            key = f"{directive} {match.group(2)}"
+            section_content = match.group(0).strip()
             processed_content = handler_functions[directive](section_content, cidr_networks)
-            # Generate Alteon config for the processed content
             alteon_config = alteon_config_generators[directive](processed_content)
+            config_sections[key] = alteon_config
+    
+    # Second pass: Process frontends and listens (now SSL verify info is available)
+    for match in all_matches:
+        directive = match.group(1).lower()
+        if directive in ['listen', 'frontend']:
+            directive_counters[directive] += 1
+            key = f"{directive} {match.group(2)}"
+            section_content = match.group(0).strip()
+            processed_content = handler_functions[directive](section_content, cidr_networks)
+            alteon_config = alteon_config_generators[directive](processed_content, proxy_ip)
             config_sections[key] = alteon_config
 
     # Write processed content to the output file
@@ -1191,6 +1281,7 @@ def main():
     parser.add_argument('-pass', '--passphrase', type=str, default='passphrase', help='Passphrase for additional security measures.')
     parser.add_argument('--always-add-port', dest='always_add_port', action='store_true', help='Always add port to real server configurations.')
     parser.add_argument('-c', '--cidr_networks', type=str, help='Comma-separated list of CIDR IP networks to log servers that match them.')
+    parser.add_argument('--proxy-ip', type=str, help='Proxy IP address to add to all services (format: IP/subnet, e.g., 1.1.1.1/32).')
 
     args = parser.parse_args()
 
@@ -1213,7 +1304,7 @@ def main():
 
     # Extract and process configuration
     try:
-        result_counters, result_config = extract_config(args.input_file, args.output_file, cidr_networks)
+        result_counters, result_config = extract_config(args.input_file, args.output_file, cidr_networks, args.proxy_ip)
         result_string = '\n'.join(result_config.values())
     except Exception as e:
         print(f"Failed to process configuration: {e}")
