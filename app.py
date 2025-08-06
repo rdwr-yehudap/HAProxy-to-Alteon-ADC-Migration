@@ -14,6 +14,7 @@ import ipaddress
 ACTION_LOG_NAME = 'action_logger'
 HAP_PREFIX = 'HAP-'
 MAX_ID_LENGTH = 32
+SHARED_SSL_POLICY_NAME = 'HAP-shared-fe-be-ssl'
 
 https_url_prefix = "https://"
 content_type = "application/json;charset=UTF-8"
@@ -23,6 +24,8 @@ always_add_port_to_real = False
 
 # Global variable to track SSL verify servers for backend SSL configuration
 ssl_verify_backends = set()
+# Global variable to track if shared SSL policy has been generated
+shared_ssl_policy_generated = False
 
 ####################
 # Helper functions #
@@ -125,6 +128,85 @@ def ensure_hap_prefix_length(name, prefix=HAP_PREFIX):
     # Truncate original name to fit with prefix
     max_name_length = MAX_ID_LENGTH - len(prefix)
     return prefix + name[:max_name_length]
+
+def generate_shared_ssl_policy_config():
+    """
+    Generate the shared SSL policy configuration for frontend and backend SSL 
+    without custom ciphers. This policy is used when:
+    1. Frontend has SSL (crt directive in bind)
+    2. Backend has SSL verify (ssl verify in server line)
+    3. No custom ciphers are specified
+    """
+    global shared_ssl_policy_generated
+    
+    if shared_ssl_policy_generated:
+        return ""
+    
+    shared_ssl_policy_generated = True
+    
+    ssl_policy_config = (
+        f"/c/slb/ssl/sslpol {SHARED_SSL_POLICY_NAME}\n"
+        f" \t cipher high\n"
+        f" \t ena\n"
+        f"/c/slb/ssl/sslpol {SHARED_SSL_POLICY_NAME}/backend\n"
+        f" \t ssl enabled\n"
+    )
+    
+    log_action(f"Generated shared SSL policy {SHARED_SSL_POLICY_NAME} for frontend and backend SSL without custom ciphers", level='info')
+    
+    return ssl_policy_config
+
+def should_use_shared_ssl_policy(data):
+    """
+    Check if the data configuration should use the shared SSL policy.
+    Returns True if:
+    1. Has frontend SSL (ssl in bind options)
+    2. Has backend SSL verify servers
+    3. No custom ciphers specified
+    """
+    global ssl_verify_backends
+    
+    # Check if any bind has SSL without custom ciphers
+    has_frontend_ssl_without_custom_ciphers = False
+    if data.get('bind'):
+        for bind in data['bind']:
+            if 'ssl' in bind.get('bind_options', ''):
+                # Check for custom ciphers
+                ciphers_match = re.search(r'ciphers\s([^\s]+)', bind['bind_options'])
+                if not ciphers_match:
+                    has_frontend_ssl_without_custom_ciphers = True
+                    break
+    
+    if not has_frontend_ssl_without_custom_ciphers:
+        return False
+    
+    # Check if any servers have SSL verify (backend SSL)
+    has_ssl_verify_servers = False
+    if data:
+        # Check direct servers (for listen sections) - only check enabled servers
+        if data.get('servers'):
+            for server in data['servers']:
+                # Only check enabled servers (skip disabled ones)
+                if not server.get('disabled', False) and 'server_options' in server:
+                    for option_key in server['server_options']:
+                        if 'ssl verify' in option_key:
+                            has_ssl_verify_servers = True
+                            break
+                    if has_ssl_verify_servers:
+                        break
+        
+        # Check default backend
+        if not has_ssl_verify_servers and data.get('default_backend') and data['default_backend'] in ssl_verify_backends:
+            has_ssl_verify_servers = True
+        
+        # Check use_backends
+        if not has_ssl_verify_servers and data.get('use_backends'):
+            for backend_info in data['use_backends']:
+                if backend_info['backend'] in ssl_verify_backends:
+                    has_ssl_verify_servers = True
+                    break
+    
+    return has_ssl_verify_servers
 
 def generate_virtual_service_base(name, vip_ip):
     # Add HAP- prefix to virtual service name
@@ -283,6 +365,12 @@ def generate_ssl_policy_config(name, bind, data=None):
     # Only create SSL policy if we have custom ciphers OR need backend SSL
     if not ciphers_match and not has_ssl_verify_servers:
         return None, None
+    
+    # Use shared policy if no custom ciphers and has SSL verify servers
+    if not ciphers_match and has_ssl_verify_servers:
+        shared_policy_config = generate_shared_ssl_policy_config()
+        log_action(f"Using shared SSL policy {SHARED_SSL_POLICY_NAME} for {name} (frontend SSL + backend SSL verify, no custom ciphers)", level='info')
+        return SHARED_SSL_POLICY_NAME, shared_policy_config
     
     # Use custom ciphers if specified, otherwise use default
     if ciphers_match:
@@ -562,6 +650,12 @@ def generate_alteon_listen(data, proxy_ip=None):
     logging.info(f"Received data (generate_alteon_listen): {data}")
 
     listen_config = []
+    
+    # Generate shared SSL policy if needed (frontend SSL + backend SSL verify, no custom ciphers)
+    if should_use_shared_ssl_policy(data):
+        shared_ssl_config = generate_shared_ssl_policy_config()
+        if shared_ssl_config:
+            listen_config.append(shared_ssl_config)
 
     # Set up the virtual service base with the first bind IP and the listen name
     if data['bind']:
@@ -617,14 +711,21 @@ def generate_alteon_listen(data, proxy_ip=None):
 
 def generate_alteon_frontend(data, proxy_ip=None):
     logging.info(f"Received data (generate_alteon_frontend): {data}")
+    
+    # Generate shared SSL policy if needed (frontend SSL + backend SSL verify, no custom ciphers)
+    config = ""
+    if should_use_shared_ssl_policy(data):
+        shared_ssl_config = generate_shared_ssl_policy_config()
+        if shared_ssl_config:
+            config += shared_ssl_config + "\n"
 
     vip_ip = data['bind'][0]['ip'] if data['bind'] else None  # Assumes all binds are on the same IP
     if not vip_ip:
         logging.error("No bind IP provided in data.")
-        return ""
+        return config
 
     virt_name = data['name']
-    config = generate_virtual_service_base(virt_name, vip_ip)
+    config += generate_virtual_service_base(virt_name, vip_ip)
     config += '\n'.join(generate_virtual_service_configs(data, proxy_ip=proxy_ip))
 
     for backend in data['use_backends']:
