@@ -224,7 +224,7 @@ def generate_virtual_service_configs(data, cert="WebManagementCert", ssl_pol="Ou
                     service_config += f"/c/slb/virt {virt_name}/service {bind['port']} {service_type}/pbind cookie rewrite \"{cookie['value']}\" disable\n"
         
         # Add proxy IP configuration if provided
-        if proxy_ip and service_type in ['http', 'https']:
+        if proxy_ip and service_type in ['http', 'https', 'basic-slb']:
             service_config += f"/c/slb/virt {virt_name}/service {bind['port']} {service_type}\n"
             service_config += f" \t dbind forceproxy\n"
             # Parse proxy IP to get IP and subnet mask
@@ -254,33 +254,7 @@ def generate_ssl_policy_config(name, bind, data=None):
     bind_options = bind['bind_options']
     ciphers_match = re.search(r'ciphers\s([^\s]+)', bind_options)
     
-    if ciphers_match:
-        ciphers = ciphers_match.group(1)
-    else:
-        return None, None
-
-    # Extract the interface name from the bind options
-    interface_match = re.search(r'interface\s(\w+)', bind_options)
-    
-    if interface_match:
-        interface = interface_match.group(1)
-        # Create a composite name with the interface name
-        composite_name = f"{name}_{interface}_pol"
-    else:
-        # Create a composite name without the interface name
-        composite_name = f"{name}_pol"
-    
-    # Ensure HAP- prefix and length limits
-    composite_name = ensure_hap_prefix_length(composite_name)
-    
-    # Generate the Alteon SSL policy configuration
-    ssl_policy_config = (
-        f"/c/slb/ssl/sslpol {composite_name}\n"
-        f" \t cipher user-defined-expert \"{ciphers}\"\n"
-        f" \t ena\n"
-    )
-    
-    # Check if any backend used by this frontend has SSL verify servers
+    # Check if any servers have SSL verify (to determine if we need backend SSL)
     has_ssl_verify_servers = False
     if data:
         # Check direct servers (for listen sections) - only check enabled servers
@@ -305,6 +279,37 @@ def generate_ssl_policy_config(name, bind, data=None):
                 if backend_info['backend'] in ssl_verify_backends:
                     has_ssl_verify_servers = True
                     break
+    
+    # Only create SSL policy if we have custom ciphers OR need backend SSL
+    if not ciphers_match and not has_ssl_verify_servers:
+        return None, None
+    
+    # Use custom ciphers if specified, otherwise use default
+    if ciphers_match:
+        ciphers = ciphers_match.group(1)
+    else:
+        ciphers = "DEFAULT"  # Default cipher suite
+
+    # Extract the interface name from the bind options
+    interface_match = re.search(r'interface\s(\w+)', bind_options)
+    
+    if interface_match:
+        interface = interface_match.group(1)
+        # Create a composite name with the interface name
+        composite_name = f"{name}_{interface}_pol"
+    else:
+        # Create a composite name without the interface name
+        composite_name = f"{name}_pol"
+    
+    # Ensure HAP- prefix and length limits
+    composite_name = ensure_hap_prefix_length(composite_name)
+    
+    # Generate the Alteon SSL policy configuration
+    ssl_policy_config = (
+        f"/c/slb/ssl/sslpol {composite_name}\n"
+        f" \t cipher user-defined-expert \"{ciphers}\"\n"
+        f" \t ena\n"
+    )
     
     # Add backend SSL if any referenced backend has SSL verify servers
     if has_ssl_verify_servers:
