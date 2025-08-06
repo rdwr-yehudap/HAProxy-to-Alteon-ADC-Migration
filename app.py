@@ -290,34 +290,45 @@ def generate_ssl_policy_config(name, bind, data=None):
     else:
         ciphers = "DEFAULT"  # Default cipher suite
 
-    # Extract the interface name from the bind options
-    interface_match = re.search(r'interface\s(\w+)', bind_options)
+    # Create a safe base name by removing any problematic characters
+    safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
     
-    if interface_match:
-        interface = interface_match.group(1)
-        # Create a composite name with the interface name
-        composite_name = f"{name}_{interface}_pol"
-    else:
-        # Create a composite name without the interface name
-        composite_name = f"{name}_pol"
+    # Create SSL policy name without interface (interface not relevant for Alteon)
+    composite_name = f"{safe_name}_pol"
     
-    # Ensure HAP- prefix and length limits
-    composite_name = ensure_hap_prefix_length(composite_name)
+    # Ensure HAP- prefix and length limits - but preserve the _pol suffix
+    # First calculate available space for the name part
+    prefix_length = len(HAP_PREFIX)
+    suffix_length = len("_pol")
+    available_length = MAX_ID_LENGTH - prefix_length - suffix_length
+    
+    # If the safe name part is too long, truncate it but keep the _pol suffix
+    if len(safe_name) > available_length:
+        truncated_name = safe_name[:available_length]
+        composite_name = f"{truncated_name}_pol"
+    
+    # Now apply the HAP- prefix
+    final_name = f"{HAP_PREFIX}{composite_name}"
+    
+    # Final safety check
+    if len(final_name) > MAX_ID_LENGTH:
+        # Emergency fallback - create a simple name
+        final_name = f"{HAP_PREFIX}ssl_pol_{hash(name) % 10000}"
     
     # Generate the Alteon SSL policy configuration
     ssl_policy_config = (
-        f"/c/slb/ssl/sslpol {composite_name}\n"
+        f"/c/slb/ssl/sslpol {final_name}\n"
         f" \t cipher user-defined-expert \"{ciphers}\"\n"
         f" \t ena\n"
     )
     
     # Add backend SSL if any referenced backend has SSL verify servers
     if has_ssl_verify_servers:
-        ssl_policy_config += f"/c/slb/ssl/sslpol {composite_name}/backend\n"
+        ssl_policy_config += f"/c/slb/ssl/sslpol {final_name}/backend\n"
         ssl_policy_config += f" \t ssl enabled\n"
-        logging.info(f"Added backend SSL to SSL policy {composite_name} due to SSL verify servers in referenced backends")
+        logging.info(f"Added backend SSL to SSL policy {final_name} due to SSL verify servers in referenced backends")
     
-    return composite_name, ssl_policy_config
+    return final_name, ssl_policy_config
 
 def generate_content_class_config(backend, acls):
     # Add HAP- prefix to content class name
@@ -864,9 +875,20 @@ def extract_frontend(section_content, cidr_networks=[]):
     for line in lines:
         original_line = line
         line = line.strip()
-        if line.startswith('#') or not line:
-            logging.info(f"Skipping line: '{original_line}'")  # Log skipped lines
-            continue  # Skip comments and empty lines
+        
+        # Skip empty lines
+        if not line:
+            continue
+            
+        # Skip general comments - if line has leading whitespace before #, treat as general comment
+        if original_line.lstrip() != original_line and original_line.lstrip().startswith('#'):
+            logging.info(f"Skipping comment line: '{original_line}'")
+            continue
+            
+        # Skip direct comments (lines that start with # without leading whitespace)
+        if line.startswith('#'):
+            logging.info(f"Skipping comment line: '{original_line}'")
+            continue
 
         if line.startswith('bind'):
             bind_match = re.search(r"bind\s+(\S+)(.*)", line)
@@ -960,14 +982,22 @@ def extract_listen(section_content, cidr_networks=[]):
 
     lines = section_content.split('\n')
     for line in lines:
-        original_line = line.strip()  # Strip whitespace for consistent processing
-        line = original_line.lstrip()  # Remove leading spaces for command detection
+        original_line = line
+        line = line.strip()
         
-        # Continue processing comments that are not '#server' with relevant configurations
+        # Skip empty lines
+        if not line:
+            continue
+            
+        # Skip general comments - if line has leading whitespace before #, treat as general comment
+        if original_line.lstrip() != original_line and original_line.lstrip().startswith('#'):
+            logging.info(f"Skipping comment line: '{original_line}'")
+            continue
+            
+        # Skip direct comments (lines that start with # without leading whitespace)
         if line.startswith('#'):
-            if not line.startswith('#server'):
-                logging.info(f"Skipping comment line: '{original_line}'")
-                continue  # Skip all other comments
+            logging.info(f"Skipping comment line: '{original_line}'")
+            continue
 
         # Extract the name of the listen section
         if line.startswith('listen'):
@@ -1052,7 +1082,30 @@ def extract_backend(section_content, cidr_networks=[]):
 
     # Iterate over server lines
     server_lines = section_content.splitlines()
-    servers = [parse_server_directive(line.strip()) for line in server_lines if line.strip().startswith("server") or line.strip().startswith('#server')]
+    
+    # Filter out general comments (any line starting with # after whitespace)
+    valid_server_lines = []
+    for line in server_lines:
+        stripped = line.strip()
+        
+        # Skip empty lines
+        if not stripped:
+            continue
+            
+        # Skip general comments - if line has leading whitespace before #, treat as general comment
+        if line.lstrip() != line and line.lstrip().startswith('#'):
+            # This line has leading whitespace before #, so it's a general comment - skip it
+            continue
+            
+        # Skip direct comments (lines that start with # without leading whitespace)
+        if line.startswith('#'):
+            continue
+        
+        # Only process server lines
+        if stripped.startswith("server"):
+            valid_server_lines.append(line)
+    
+    servers = [parse_server_directive(line.strip()) for line in valid_server_lines]
 
     # Check for SSL verify servers and add backend to global set - only check enabled servers
     has_ssl_verify = False
