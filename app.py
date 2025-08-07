@@ -419,13 +419,38 @@ def generate_ssl_policy_config(name, bind, data=None):
     return final_name, ssl_policy_config
 
 def generate_content_class_config(backend, acls):
-    # Add HAP- prefix to content class name
-    class_name = ensure_hap_prefix_length(backend['backend'])
+    # Create a unique class name by combining backend name with conditions
+    # This ensures each use_backend directive gets its own content class
+    backend_name = backend['backend']
+    conditions_string = backend['conditions'].replace(' ', '-')
+    
+    # Create unique class name: backend-name + conditions
+    # For longer names, use a hash to ensure uniqueness within length limits
+    base_name = f"{backend_name}-{conditions_string}"
+    
+    # If the base name is too long, create a shorter unique name using hash
+    if len(base_name) > 32:  # MAX_ID_LENGTH
+        import hashlib
+        # Create hash of the full unique identifier
+        hash_suffix = hashlib.md5(f"{backend_name}-{conditions_string}".encode()).hexdigest()[:8]
+        # Use backend name truncated + hash for uniqueness
+        max_backend_length = 32 - 1 - 8  # - (1) + hash (8)
+        truncated_backend = backend_name[:max_backend_length]
+        base_name = f"{truncated_backend}-{hash_suffix}"
+    
+    # Content class name without HAP- prefix
+    class_name = base_name
+    
     class_config = f"/c/slb/layer7/slb/cntclss {class_name} http\n"
     header_count = 1
     path_count = 1
+    
+    # Split conditions by spaces or other operators to get individual ACL names
+    condition_acls = backend['conditions'].replace(' and ', ' ').replace(' or ', ' ').split()
+    
     for acl in acls:
-        if acl['name'] in backend['conditions']:
+        # Use exact match instead of substring match to avoid 'isssf' matching 'isssf2'
+        if acl['name'] in condition_acls:
             condition = acl['condition']
             if 'host' in condition and condition['host'] != None:
                 class_config += f"/c/slb/layer7/slb/cntclss {class_name} http/header {header_count}\n"
@@ -756,13 +781,33 @@ def generate_backend_service_configs(virt_name, virt_port, service_type, backend
     service_config = ''
     for i, backend in enumerate(backends):
         rule_id = (i + 1) * 5  # Start from 5, increment by 5 (5, 10, 15, etc.)
-        # Add HAP- prefix to backend group name
+        
+        # Create unique content class name matching the one in generate_content_class_config
+        backend_name = backend['backend']
+        conditions_string = backend['conditions'].replace(' ', '-')
+        
+        # Use same logic as generate_content_class_config for consistency
+        base_name = f"{backend_name}-{conditions_string}"
+        
+        # If the base name is too long, create a shorter unique name using hash
+        if len(base_name) > 32:  # MAX_ID_LENGTH
+            import hashlib
+            # Create hash of the full unique identifier
+            hash_suffix = hashlib.md5(f"{backend_name}-{conditions_string}".encode()).hexdigest()[:8]
+            # Use backend name truncated + hash for uniqueness
+            max_backend_length = 32 - 1 - 8  # - (1) + hash (8)
+            truncated_backend = backend_name[:max_backend_length]
+            base_name = f"{truncated_backend}-{hash_suffix}"
+        
+        content_class_name = base_name
+        
+        # Add HAP- prefix to backend group name (this remains just the backend name)
         backend_group = ensure_hap_prefix_length(backend['backend'])
         # Ensure virt_name has HAP- prefix
         virt_name_prefixed = ensure_hap_prefix_length(virt_name)
         service_config += f" /c/slb/virt {virt_name_prefixed}/service {virt_port} {service_type}/cntrules {rule_id}\n"
         service_config += f" \tena\n"
-        service_config += f" \tcntclss \"{backend_group}\"\n"
+        service_config += f" \tcntclss \"{content_class_name}\"\n"
         service_config += f" \tgroup {backend_group}\n"
 
     return service_config
@@ -884,6 +929,8 @@ def parse_acl(line):
         path_beg_match = re.search(r"path_beg\s+-?i?\s+(.+)", acl_condition)
         path_end_match = re.search(r"path_end\s+-?i?\s+(.+)", acl_condition)
         host_match = re.search(r"hdr\(host\)\s+-i\s+(\S+)", acl_condition)
+        # Add support for hdr_sub(host) pattern
+        host_sub_match = re.search(r"hdr_sub\(host\)\s+-i\s+(\S+)", acl_condition)
 
         acl_entries = []
         condition_type = None
@@ -924,9 +971,10 @@ def parse_acl(line):
                         }
                     })
 
-        # Handle host conditions
-        if host_match:
-            hosts = host_match.group(1).split()
+        # Handle host conditions (both hdr(host) and hdr_sub(host))
+        host_condition = host_match or host_sub_match
+        if host_condition:
+            hosts = host_condition.group(1).split()
             for host in hosts:
                 acl_entries.append({
                     'name': acl_name,
